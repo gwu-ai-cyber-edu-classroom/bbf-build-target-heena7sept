@@ -139,8 +139,13 @@ def upload():
     if uploaded is None or uploaded.filename == "":
         return redirect(url_for("index"))
 
-    # Strip any directory components / traversal sequences from the name (P4).
-    name = secure_filename(uploaded.filename)
+    # Strip any directory components / traversal sequences from the name (P4),
+    # then canonicalise case (P2). On a case-insensitive filesystem (Windows,
+    # macOS) "Report.txt" and "report.txt" are the SAME file on disk; without
+    # canonicalising we'd keep two FILES entries pointing at one file, so the
+    # metadata (size) and served bytes desync and one silently overwrites the
+    # other. Folding to one canonical key makes the store 1:1 with the disk.
+    name = secure_filename(uploaded.filename).casefold()
     if not name:
         abort(400, description="Invalid file name.")
 
@@ -160,6 +165,9 @@ def upload():
 
 @app.route("/files/<name>")
 def preview(name):
+    # Look up with the same canonical (case-folded) key used at upload, so a
+    # request for "Report.txt" resolves to the one stored "report.txt" (P2).
+    name = name.casefold()
     meta = FILES.get(name)
     if meta is None:
         abort(404)
