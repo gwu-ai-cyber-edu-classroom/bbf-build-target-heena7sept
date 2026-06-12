@@ -1,7 +1,9 @@
 # Build-check dependency (runs in CI regardless of your chosen target).
 pytest>=7.0
 
-# Add your build target's own dependencies below, e.g.:
-#   flask            # for a local web app
+# Build target: File upload + preview (menu #6) — Flask web app.
+flask>=3.0
+
+# Other options (unused):
 #   fastapi uvicorn  # for a REST API
 #   openai>=1.0.0    # only if you pick the optional AI-assistant track

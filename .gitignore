@@ -1,0 +1,4 @@
+# Runtime upload storage — regenerated on startup, holds the seeded canary file.
+data/
+__pycache__/
+*.pyc

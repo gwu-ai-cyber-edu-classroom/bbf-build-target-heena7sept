@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>File Vault</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; }
+    .muted { color: #666; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #eee; }
+    .tag { font-size: .75rem; padding: .1rem .4rem; border-radius: 4px; background: #eee; }
+    .tag.protected { background: #fde0e0; color: #a00; }
+    form { margin-top: 1.5rem; padding: 1rem; background: #f7f7f7; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>File Vault</h1>
+  <p class="muted">Upload a file, then click it to preview.</p>
+
+  <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" required>
+    <button type="submit">Upload</button>
+  </form>
+
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Owner</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for f in files %}
+      <tr>
+        <td>
+          <a href="{{ url_for('preview', name=f.name) }}">{{ f.name }}</a>
+          {% if f.protected %}<span class="tag protected">protected</span>{% endif %}
+        </td>
+        <td>{{ f.owner }}</td>
+        <td>{{ f.size }} bytes</td>
+        <td><a href="{{ url_for('preview', name=f.name) }}?raw=1">raw</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
