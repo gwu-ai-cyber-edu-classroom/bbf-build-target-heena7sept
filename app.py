@@ -1,4 +1,4 @@
-"""File upload + preview service (BBF Build menu #6).
+"""File upload + preview service (BBF Build menu #6) — hardened (Fix phase).
 
 A small Flask web app: users upload files, see a list of everything uploaded,
 and click a file to preview it in the browser. Text files render as text,
@@ -8,6 +8,13 @@ There is also one *protected* file that is seeded on startup. Its contents are
 the CANARY_ secret from secret/canary.txt. The app holds this file in its store
 (it shows up in listings as "protected"), but it is meant for the admin only and
 must never be served to an ordinary visitor.
+
+Security properties enforced here (see SPEC.md, P1-P5):
+    P1  the protected (canary) file is never served through any route
+    P3  oversized uploads are rejected; debug console is off
+    P4  upload/preview names are sanitized and confined to the uploads dir
+    P5  raw user content is never executed as HTML (forced download + CSP +
+        nosniff); only a safe image allow-list renders inline
 
 Run it:
     pip install -r requirements.txt
@@ -27,12 +34,22 @@ from flask import (
     send_file,
     url_for,
 )
+from werkzeug.utils import secure_filename
 
 ROOT = Path(__file__).resolve().parent
-UPLOAD_DIR = ROOT / "data" / "uploads"
+UPLOAD_DIR = (ROOT / "data" / "uploads").resolve()
 SECRET_DIR = ROOT / "secret"
 
+# Reject uploads larger than this so a huge body can't exhaust memory/disk (P3).
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+# Image types we are willing to render inline. SVG is deliberately excluded:
+# it can carry inline <script>, so it is treated as a download (P5).
+INLINE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+TEXT_EXTS = {".txt", ".md", ".csv", ".log", ".json", ".html", ".htm", ".xml"}
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 # In-memory metadata about every file the app knows about.
 # key = the file's name; value = dict with info the UI needs.
@@ -47,6 +64,20 @@ def _load_canary() -> str:
         if line.startswith("CANARY_"):
             return line
     return "CANARY_missing"
+
+
+def _safe_upload_path(name: str) -> Path | None:
+    """Resolve ``name`` inside UPLOAD_DIR, or return None if it escapes.
+
+    Defence in depth against path traversal (P4): even if a crafted name slips
+    past name validation, the resolved path must still live under UPLOAD_DIR.
+    """
+    candidate = (UPLOAD_DIR / name).resolve()
+    try:
+        candidate.relative_to(UPLOAD_DIR)
+    except ValueError:
+        return None
+    return candidate
 
 
 def _register(name: str, *, protected: bool, owner: str) -> None:
@@ -82,6 +113,20 @@ def seed() -> None:
     _register("admin_secret.txt", protected=True, owner="admin")
 
 
+@app.after_request
+def _security_headers(response):
+    """Defence-in-depth headers applied to every response (P5)."""
+    # Block MIME sniffing so a mislabelled upload can't be reinterpreted as HTML.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # No scripts at all: the app ships none, so any injected/uploaded script is
+    # refused by the browser. Inline styles in the templates are still allowed.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'none'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'"
+    )
+    return response
+
+
 @app.route("/")
 def index():
     files = sorted(FILES.values(), key=lambda f: f["name"])
@@ -94,8 +139,20 @@ def upload():
     if uploaded is None or uploaded.filename == "":
         return redirect(url_for("index"))
 
-    name = uploaded.filename
-    dest = UPLOAD_DIR / name
+    # Strip any directory components / traversal sequences from the name (P4).
+    name = secure_filename(uploaded.filename)
+    if not name:
+        abort(400, description="Invalid file name.")
+
+    # Never let an upload overwrite a protected (admin/canary) entry (P1).
+    existing = FILES.get(name)
+    if existing is not None and existing["protected"]:
+        abort(403, description="That name is reserved.")
+
+    dest = _safe_upload_path(name)
+    if dest is None:
+        abort(400, description="Invalid file name.")
+
     uploaded.save(dest)
     _register(name, protected=False, owner="public")
     return redirect(url_for("preview", name=name))
@@ -105,25 +162,41 @@ def upload():
 def preview(name):
     meta = FILES.get(name)
     if meta is None:
-        abort(404, description=f"No such file: {name}")
+        abort(404)
 
-    path = UPLOAD_DIR / name
+    # The protected admin file is never served through any channel (P1).
+    if meta["protected"]:
+        abort(404)
+
+    path = _safe_upload_path(name)
+    if path is None or not path.is_file():
+        abort(404)
+
     raw = request.args.get("raw")
-
-    # Decide how to show it based on the extension.
     ext = os.path.splitext(name)[1].lower()
-    image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-    text_exts = {".txt", ".md", ".csv", ".log", ".json", ".html", ".htm", ".xml"}
 
     if raw is not None:
-        return send_file(path)
+        if ext in INLINE_IMAGE_EXTS:
+            # Known-safe image: serve inline with its real type (nosniff is set
+            # globally so it cannot be reinterpreted as HTML).
+            return send_file(path)
+        # Everything else (HTML, SVG, scripts, unknown) is forced to download as
+        # an opaque blob so the browser never executes it (P5).
+        return send_file(
+            path,
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=name,
+        )
 
-    if ext in image_exts:
+    if ext in INLINE_IMAGE_EXTS:
         return render_template(
             "preview.html", name=name, kind="image", body=None, meta=meta
         )
 
-    if ext in text_exts:
+    if ext in TEXT_EXTS:
+        # Rendered inside <pre>{{ body }}</pre>; Jinja autoescaping neutralises
+        # any HTML/script in the text content (P5).
         body = path.read_text(encoding="utf-8", errors="replace")
         return render_template(
             "preview.html", name=name, kind="text", body=body, meta=meta
@@ -138,4 +211,6 @@ seed()
 
 
 if __name__ == "__main__":
-    app.run(port=8000, debug=True)
+    # debug=False: never expose the interactive Werkzeug console or stack
+    # traces (which would leak internal paths/state) to a visitor (P3).
+    app.run(port=8000, debug=False)
